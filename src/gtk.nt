@@ -1,0 +1,408 @@
+module gtk;
+
+import backend.base;
+import neat.base;
+import neat.expr;
+import neat.hash;
+import neat.types;
+import neat.util;
+import std.file;
+import std.macro.cimport;
+import std.string;
+
+class GlibClassMacro : Macro
+{
+    this() { }
+    override void apply(MacroArgs args) {
+        if (auto parseImport = args.instanceOf(ParseImportArgs)) {
+            parseImport.module_ = this.parseImport(parseImport.parser, parseImport.lexicalContext);
+            return;
+        }
+        if (auto parseType = args.instanceOf(TypeMacroArgs)) {
+            parseType.astType = this.parseGlibClass(parseType.parser, parseType.lexicalContext);
+            return;
+        }
+    }
+    (nullable ASTModuleBase | fail Error) parseImport(Parser parser, LexicalContext lexicalContext) {
+        auto compiler = lexicalContext.compiler;
+        auto cImport = new CImportMacro;
+        auto pkgTmp = ".obj/pkgconfig-gtk.txt";
+        if (!pkgTmp.exists) {
+            neat_runtime_system("pkg-config gtk+-3.0 --cflags-only-I --libs > $pkgTmp");
+        }
+        mut string[] cflagIncludes;
+        mut string[] libs;
+        for (flag in pkgTmp.readText.strip.split(" ")) {
+            if (flag.startsWith("-I")) cflagIncludes ~= flag;
+            if (flag.startsWith("-l")) libs ~= flag[2 .. $];
+        }
+        string extraIncludeFlags = (compiler.cFlags ~ cflagIncludes).join(" ");
+
+        if (parser.accept("__c_glib")?) {
+            return cImport.parseIncludeModule("glib.h", extraIncludeFlags, lexicalContext);
+        }
+        if (parser.accept("__c_gtk_gtk")?) {
+            return cImport.parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext);
+        }
+        if (parser.accept("__gtk_libs")?) {
+            auto pak = new Package("gtk_libs", "", []);
+            auto mod = compiler.astModule("gtk_libs", pak, new MacroState, __RANGE__, null);
+            for (lib in libs) {
+                mod.addEntry(
+                    Protection.private_,
+                    compiler.astPragma("lib", [compiler.astStringLiteral(lib, __RANGE__)], __RANGE__));
+            }
+            return mod;
+        }
+        return null;
+    }
+
+    ASTModuleBase gtkLibModule(CompilerBase compiler) {
+    }
+
+    (nullable ASTSymbol | fail Error) parseGlibClass(Parser parser, LexicalContext lexicalContext) {
+        auto from = parser.from?;
+        if (!parser.accept("defGlibClass")?) return null;
+        auto locRange = parser.to(from);
+        auto compiler = lexicalContext.compiler;
+        parser.expect("(")?;
+        auto prefixFrom = parser.from?;
+        parser.expect("\"")?;
+        auto baseType = compiler.parseStringLiteral(parser, lexicalContext, "\"", prefixFrom)?
+            .instanceOf(ASTStringLiteral)
+            .notNull;
+        mut nullable ASTSymbol parent = null;
+        if (parser.accept(",")?)
+            parent = compiler.parseExpression(parser, lexicalContext)?;
+        parser.expect(")")?;
+        return new ASTGlibClass(locRange, baseType.text, parent);
+    }
+}
+
+class ASTGlibClass : ASTSymbol
+{
+    string baseType;
+    nullable ASTSymbol parent;
+    this(this.locRange, this.baseType, this.parent) {}
+
+    override (Symbol | fail Error) compile(Context context) {
+        mut nullable GlibClass parent = null;
+        if (this.parent) {
+            auto parentSym = this.parent.compile(context)?;
+            context.assert2(!!parentSym.instanceOf(GlibClass), this.parent.locRange, "parent must be Glib class")?;
+            parent = parentSym.instanceOf(GlibClass).notNull;
+        }
+        auto baseType = context.namespace.lookup(
+            "_$(this.baseType)", context, LookupReason.identifier, this.locRange)?;
+        context.assert2(!!baseType, this.locRange, "base type _$(this.baseType) not found")?;
+        auto baseType = new Pointer(baseType.notNull.beType(this.locRange)?);
+        auto prefix = this.baseType.camelToSnake;
+        return new GlibClass(prefix, baseType, parent);
+    }
+
+    override string repr() { return "defGlibClass($baseType, $(parent.repr))"; }
+}
+
+class GlibClass : Type
+{
+    string prefix;
+    Type baseType;
+    nullable GlibClass parent;
+    this(this.prefix, this.baseType, this.parent) {
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform) {
+        return new BackendPointerType(new BackendVoidType);
+    }
+
+    override bool same(Type other) {
+        if (auto otherGlib = other.instanceOf(GlibClass))
+            return this.prefix == otherGlib.prefix;
+        return false;
+    }
+
+    override (nullable Expression | fail Error) callMember(
+        Context context, nullable Expression base, string field, ASTArgument[] args,
+        Protection protection, LocRange locRange)
+    {
+        // FIXME .astCall with ASTArgument
+        mut ASTSymbol[] argSyms;
+        for (arg in args) argSyms ~= arg.sym;
+        auto mySym = new ASTSymbolHelper(this);
+        if (!base) {
+            string glibName = "$(prefix)_$(field.camelToSnake)";
+            ASTSymbol target = context.compiler.astIdentifier(glibName, locRange);
+            auto call = context.compiler.astCall(target, argSyms, locRange);
+            // assume it's a constructor (TODO check this)
+            auto cast_ = context.compiler.astCast(mySym, call, locRange);
+
+            return cast_.compile(context)?.beExpression(locRange)?;
+        }
+        return callMethod(context, base.notNull, field, argSyms, locRange);
+    }
+
+    (nullable Expression | fail Error) callMethod(
+        Context context, Expression base, string field, ASTSymbol[] args, LocRange locRange)
+    {
+        string glibName = "$(prefix)_$(field.camelToSnake)";
+        if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
+            auto target = new ASTSymbolHelper(fun);
+            // TODO auto argsWithSelf = [new ASTSymbolHelper(base), ...args];
+            auto argsWithSelf = [(new ASTSymbolHelper(base)).instanceOf(ASTSymbol).notNull] ~ args;
+            auto call = context.compiler.astCall(target, argsWithSelf, locRange);
+            return call.compile(context)?.beExpression(locRange)?;
+        }
+        if (auto parent = this.parent) return parent.callMethod(context, base, field, args, locRange);
+        return null;
+    }
+
+    override (nullable Symbol | fail Error) accessMember(
+        Context context, nullable Expression base, string field, Protection protection, LocRange locRange)
+    {
+        if (!base) return null;
+        auto base = base.notNull;
+        string glibName = "$(prefix)_$(field.camelToSnake)";
+        if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
+            if (auto funDecl = fun.instanceOf(FunctionDeclarationBase))
+                return new StubMethodCall(funDecl, base);
+        }
+        if (auto parent = this.parent) return parent.accessMember(context, base, field, protection, locRange);
+        return null;
+    }
+
+    override nullable Expression implicitConvertTo(Context context, Expression source, Type target) {
+        if (target.same(this) || target.same(this.baseType))
+            return context.compiler.castTo(target, source);
+        if (auto parent = this.parent)
+            return parent.implicitConvertTo(context, source, target);
+        return null;
+    }
+
+    override string repr() { return this.prefix; }
+
+    override string mangle() { return "glib_" ~ this.prefix; }
+
+    override void hash(Hash hash) { hash.adds("glib"); hash.adds(this.prefix); }
+}
+
+private class StubMethodCall : LateSymbol
+{
+    FunctionDeclarationBase fun;
+    Expression firstArg;
+    this(this.fun, this.firstArg) {}
+    override LateSymbolResult resolve(Context context) {
+        auto funcPtr = context.compiler.functionReference(fun);
+        return LateSymbolResult(setup=null, funcPtr=funcPtr, firstArg=firstArg, teardown=null);
+    }
+}
+
+private string camelToSnake(string text) {
+    mut string[] fragments;
+    mut size_t base = 0;
+    bool isUpper(char c) { return c >= "A"[0] && c <= "Z"[0]; }
+    char toLower(char c) { if (c.isUpper) return c + ("a"[0] - "A"[0]); return c; }
+    void flush(size_t i) {
+        if (base == i) return;
+        mut string fragment;
+        for (ch in text[base .. i]) fragment ~= ch.toLower;
+        fragments ~= fragment;
+        base = i;
+    }
+    // VBox => _vbox, not _v_box
+    mut bool lastWasUpper = false;
+    for (i, ch in text) {
+        if (ch.isUpper && !lastWasUpper) {
+            flush(i);
+        }
+        lastWasUpper = ch.isUpper;
+    }
+    flush(text.length);
+    return fragments.join("_");
+}
+
+private void addGlibClassMacro(MacroState macroState)
+{
+    macroState.addMacro(new GlibClassMacro);
+}
+
+macro(addGlibClassMacro);
+
+public import __c_glib;
+public import __c_gtk_gtk;
+public import __gtk_libs;
+
+void connectSignal(GObject instance, string signal, void delegate() handler) {
+    auto state = cast(CallbackState*) malloc(sizeof(CallbackState));
+    state.dg = handler;
+    g_signal_connect_data(
+        cast(void*) instance, signal.toStringz, cast(void function()) &callSignal, state,
+        cast(void function(void*, GClosure*)) null, 0);
+}
+
+private struct CallbackState {
+    void delegate() dg;
+}
+
+// TODO multi-parameter dispatching
+private void callSignal(void* widget, void* ptr) {
+    auto state = cast(CallbackState*) ptr;
+    state.dg();
+}
+
+alias GObject = defGlibClass("GObject");
+alias Widget = defGlibClass("GtkWidget", GObject);
+alias Container = defGlibClass("GtkContainer", Widget);
+
+alias Bin = defGlibClass("GtkBin", Container);
+alias Window = defGlibClass("GtkWindow", Bin);
+alias Dialog = defGlibClass("GtkDialog", Window);
+alias AboutDialog = defGlibClass("GtkAboutDialog", Dialog);
+alias AppChooserDialog = defGlibClass("GtkAppChooserDialog", Dialog);
+alias ColorChooserDialog = defGlibClass("GtkColorChooserDialog", Dialog);
+alias ColorSelectionDialog = defGlibClass("GtkColorSelectionDialog", Dialog);
+alias FileChooserDialog = defGlibClass("GtkFileChooserDialog", Dialog);
+alias FontChooserDialog = defGlibClass("GtkFontChooserDialog", Dialog);
+alias FontSelectionDialog = defGlibClass("GtkFontSelectionDialog", Dialog);
+alias MessageDialog = defGlibClass("GtkMessageDialog", Dialog);
+alias RecentChooserDialog = defGlibClass("GtkRecentChooserDialog", Dialog);
+alias ApplicationWindow = defGlibClass("GtkApplicationWindow", Window);
+alias Assistant = defGlibClass("GtkAssistant", Window);
+alias OffscreenWindow = defGlibClass("GtkOffscreenWindow", Window);
+alias Plug = defGlibClass("GtkPlug", Window);
+alias ShortcutsWindow = defGlibClass("GtkShortcutsWindow", Window);
+alias ActionBar = defGlibClass("GtkActionBar", Bin);
+alias Alignment = defGlibClass("GtkAlignment", Bin);
+alias ComboBox = defGlibClass("GtkComboBox", Bin);
+alias AppChooserButton = defGlibClass("GtkAppChooserButton", ComboBox);
+alias ComboBoxText = defGlibClass("GtkComboBoxText", ComboBox);
+alias Frame = defGlibClass("GtkFrame", Bin);
+alias AspectFrame = defGlibClass("GtkAspectFrame", Frame);
+alias Button = defGlibClass("GtkButton", Bin);
+alias ToggleButton = defGlibClass("GtkToggleButton", Button);
+alias CheckButton = defGlibClass("GtkCheckButton", ToggleButton);
+alias RadioButton = defGlibClass("GtkRadioButton", CheckButton);
+alias MenuButton = defGlibClass("GtkMenuButton", ToggleButton);
+alias ColorButton = defGlibClass("GtkColorButton", Button);
+alias FontButton = defGlibClass("GtkFontButton", Button);
+alias LinkButton = defGlibClass("GtkLinkButton", Button);
+alias LockButton = defGlibClass("GtkLockButton", Button);
+alias ModelButton = defGlibClass("GtkModelButton", Button);
+alias ScaleButton = defGlibClass("GtkScaleButton", Button);
+alias VolumeButton = defGlibClass("GtkVolumeButton", ScaleButton);
+alias MenuItem = defGlibClass("GtkMenuItem", Bin);
+alias CheckMenuItem = defGlibClass("GtkCheckMenuItem", MenuItem);
+alias RadioMenuItem = defGlibClass("GtkRadioMenuItem", CheckMenuItem);
+alias ImageMenuItem = defGlibClass("GtkImageMenuItem", MenuItem);
+alias SeparatorMenuItem = defGlibClass("GtkSeparatorMenuItem", MenuItem);
+alias TearoffMenuItem = defGlibClass("GtkTearoffMenuItem", MenuItem);
+alias EventBox = defGlibClass("GtkEventBox", Bin);
+alias Expander = defGlibClass("GtkExpander", Bin);
+alias FlowBoxChild = defGlibClass("GtkFlowBoxChild", Bin);
+alias HandleBox = defGlibClass("GtkHandleBox", Bin);
+alias ListBoxRow = defGlibClass("GtkListBoxRow", Bin);
+alias ToolItem = defGlibClass("GtkToolItem", Bin);
+alias ToolButton = defGlibClass("GtkToolButton", ToolItem);
+alias MenuToolButton = defGlibClass("GtkMenuToolButton", ToolButton);
+alias ToggleToolButton = defGlibClass("GtkToggleToolButton", ToolButton);
+alias RadioToolButton = defGlibClass("GtkRadioToolButton", ToggleToolButton);
+alias SeparatorToolItem = defGlibClass("GtkSeparatorToolItem", ToolItem);
+alias Overlay = defGlibClass("GtkOverlay", Bin);
+alias ScrolledWindow = defGlibClass("GtkScrolledWindow", Bin);
+alias PlacesSidebar = defGlibClass("GtkPlacesSidebar", ScrolledWindow);
+alias Popover = defGlibClass("GtkPopover", Bin);
+alias PopoverMenu = defGlibClass("GtkPopoverMenu", Popover);
+alias Revealer = defGlibClass("GtkRevealer", Bin);
+alias SearchBar = defGlibClass("GtkSearchBar", Bin);
+alias StackSidebar = defGlibClass("GtkStackSidebar", Bin);
+alias Viewport = defGlibClass("GtkViewport", Bin);
+
+alias Box = defGlibClass("GtkBox", Container);
+alias AppChooserWidget = defGlibClass("GtkAppChooserWidget", Box);
+alias ButtonBox = defGlibClass("GtkButtonBox", Box);
+alias HButtonBox = defGlibClass("GtkHButtonBox", ButtonBox);
+alias VButtonBox = defGlibClass("GtkVButtonBox", ButtonBox);
+alias ColorChooserWidget = defGlibClass("GtkColorChooserWidget", Box);
+alias ColorSelection = defGlibClass("GtkColorSelection", Box);
+alias FileChooserButton = defGlibClass("GtkFileChooserButton", Box);
+alias FileChooserWidget = defGlibClass("GtkFileChooserWidget", Box);
+alias FontChooserWidget = defGlibClass("GtkFontChooserWidget", Box);
+alias FontSelection = defGlibClass("GtkFontSelection", Box);
+alias HBox = defGlibClass("GtkHBox", Box);
+alias InfoBar = defGlibClass("GtkInfoBar", Box);
+alias RecentChooserWidget = defGlibClass("GtkRecentChooserWidget", Box);
+alias ShortcutLabel = defGlibClass("GtkShortcutLabel", Box);
+alias ShortcutsGroup = defGlibClass("GtkShortcutsGroup", Box);
+alias ShortcutsSection = defGlibClass("GtkShortcutsSection", Box);
+alias ShortcutsShortcut = defGlibClass("GtkShortcutsShortcut", Box);
+alias StackSwitcher = defGlibClass("GtkStackSwitcher", Box);
+alias Statusbar = defGlibClass("GtkStatusbar", Box);
+alias VBox = defGlibClass("GtkVBox", Box);
+
+alias Fixed = defGlibClass("GtkFixed", Container);
+alias FlowBox = defGlibClass("GtkFlowBox", Container);
+alias Grid = defGlibClass("GtkGrid", Container);
+alias Paned = defGlibClass("GtkPaned", Container);
+alias HPaned = defGlibClass("GtkHPaned", Paned);
+alias VPaned = defGlibClass("GtkVPaned", Paned);
+alias HeaderBar = defGlibClass("GtkHeaderBar", Container);
+alias IconView = defGlibClass("GtkIconView", Container);
+alias Layout = defGlibClass("GtkLayout", Container);
+alias ListBox = defGlibClass("GtkListBox", Container);
+alias MenuShell = defGlibClass("GtkMenuShell", Container);
+alias Menu = defGlibClass("GtkMenu", MenuShell);
+alias RecentChooserMenu = defGlibClass("GtkRecentChooserMenu", Menu);
+alias MenuBar = defGlibClass("GtkMenuBar", MenuShell);
+alias Notebook = defGlibClass("GtkNotebook", Container);
+alias Socket = defGlibClass("GtkSocket", Container);
+alias Stack = defGlibClass("GtkStack", Container);
+alias Table = defGlibClass("GtkTable", Container);
+alias TextView = defGlibClass("GtkTextView", Container);
+alias ToolItemGroup = defGlibClass("GtkToolItemGroup", Container);
+alias ToolPalette = defGlibClass("GtkToolPalette", Container);
+alias Toolbar = defGlibClass("GtkToolbar", Container);
+alias TreeView = defGlibClass("GtkTreeView", Container);
+
+alias Misc = defGlibClass("GtkMisc", Widget);
+alias Label = defGlibClass("GtkLabel", Misc);
+alias AccelLabel = defGlibClass("GtkAccelLabel", Label);
+alias Arrow = defGlibClass("GtkArrow", Misc);
+alias Image = defGlibClass("GtkImage", Misc);
+alias Calendar = defGlibClass("GtkCalendar", Widget);
+alias CellView = defGlibClass("GtkCellView", Widget);
+alias DrawingArea = defGlibClass("GtkDrawingArea", Widget);
+alias Entry = defGlibClass("GtkEntry", Widget);
+alias SearchEntry = defGlibClass("GtkSearchEntry", Entry);
+alias SpinButton = defGlibClass("GtkSpinButton", Entry);
+alias GLArea = defGlibClass("GtkGLArea", Widget);
+alias HSV = defGlibClass("GtkHSV", Widget);
+alias Range = defGlibClass("GtkRange", Widget);
+alias Scale = defGlibClass("GtkScale", Range);
+alias HScale = defGlibClass("GtkHScale", Scale);
+alias VScale = defGlibClass("GtkVScale", Scale);
+alias HScrollbar = defGlibClass("GtkHScrollbar", Range);
+alias VScrollbar = defGlibClass("GtkVScrollbar", Range);
+alias Separator = defGlibClass("GtkSeparator", Widget);
+alias HSeparator = defGlibClass("GtkHSeparator", Separator);
+alias VSeparator = defGlibClass("GtkVSeparator", Separator);
+alias Invisible = defGlibClass("GtkInvisible", Widget);
+alias LevelBar = defGlibClass("GtkLevelBar", Widget);
+alias ProgressBar = defGlibClass("GtkProgressBar", Widget);
+alias Spinner = defGlibClass("GtkSpinner", Widget);
+alias Switch = defGlibClass("GtkSwitch", Widget);
+
+alias Adjustment = defGlibClass("GtkAdjustment", GObject);
+alias CellArea = defGlibClass("GtkCellArea", GObject);
+alias CellAreaBox = defGlibClass("GtkCellAreaBox", CellArea);
+alias CellRenderer = defGlibClass("GtkCellRenderer", GObject);
+alias CellRendererText = defGlibClass("GtkCellRendererText", CellRenderer);
+alias CellRendererAccel = defGlibClass("GtkCellRendererAccel", CellRendererText);
+alias CellRendererCombo = defGlibClass("GtkCellRendererCombo", CellRendererText);
+alias CellRendererSpin = defGlibClass("GtkCellRendererSpin", CellRendererText);
+alias CellRendererPixbuf = defGlibClass("GtkCellRendererPixbuf", CellRenderer);
+alias CellRendererProgress = defGlibClass("GtkCellRendererProgress", CellRenderer);
+alias CellRendererSpinner = defGlibClass("GtkCellRendererSpinner", CellRenderer);
+alias CellRendererToggle = defGlibClass("GtkCellRendererToggle", CellRenderer);
+alias FileFilter = defGlibClass("GtkFileFilter", GObject);
+alias RecentFilter = defGlibClass("GtkRecentFilter", GObject);
+alias TreeViewColumn = defGlibClass("GtkTreeViewColumn", GObject);
