@@ -16,7 +16,7 @@ This repo houses GTK3 bindings for the Neat language.
 2. Import the library: `import gtk;`
 3. Substitute functions as such:
     - `gtk_window_new("Hello World")` => `Window.new("Hello World")`
-    - `gtk_window_set_title("Window")` => `Window.setTitle("Window")`
+    - `gtk_window_set_title(window, "Window")` => `window.setTitle("Window")`
 4. Connect signals as such:
     `connectSignal(widget, "name", &fun)` where fun is a nested function or method.
     Note that `fun` has to outlive the signal connection!
