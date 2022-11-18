@@ -12,6 +12,8 @@ import std.string;
 
 class GlibClassMacro : Macro
 {
+    nullable ASTModuleBase gtkModule;
+
     this() { }
     override void apply(MacroArgs args) {
         if (auto parseImport = args.instanceOf(ParseImportArgs)) {
@@ -28,7 +30,7 @@ class GlibClassMacro : Macro
         auto cImport = new CImportMacro;
         auto pkgTmp = ".obj/pkgconfig-gtk.txt";
         if (!pkgTmp.exists) {
-            neat_runtime_system("pkg-config gtk+-3.0 --cflags-only-I --libs > $pkgTmp");
+            neat_runtime_system("pkg-config gtk+-3.0 gdk-pixbuf-2.0 --cflags-only-I --libs > $pkgTmp");
         }
         mut string[] cflagIncludes;
         mut string[] libs;
@@ -42,7 +44,8 @@ class GlibClassMacro : Macro
             return cImport.parseIncludeModule("glib.h", extraIncludeFlags, lexicalContext);
         }
         if (parser.accept("__c_gtk_gtk")?) {
-            return cImport.parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext);
+            this.gtkModule = cImport.parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext)?;
+            return this.gtkModule;
         }
         if (parser.accept("__gtk_libs")?) {
             auto pak = new Package("gtk_libs", "", []);
@@ -55,9 +58,6 @@ class GlibClassMacro : Macro
             return mod;
         }
         return null;
-    }
-
-    ASTModuleBase gtkLibModule(CompilerBase compiler) {
     }
 
     (nullable ASTSymbol | fail Error) parseGlibClass(Parser parser, LexicalContext lexicalContext) {
@@ -75,7 +75,7 @@ class GlibClassMacro : Macro
         if (parser.accept(",")?)
             parent = compiler.parseExpression(parser, lexicalContext)?;
         parser.expect(")")?;
-        return new ASTGlibClass(locRange, baseType.text, parent);
+        return new ASTGlibClass(locRange, baseType.text, parent, this.gtkModule.notNull);
     }
 }
 
@@ -83,7 +83,8 @@ class ASTGlibClass : ASTSymbol
 {
     string baseType;
     nullable ASTSymbol parent;
-    this(this.locRange, this.baseType, this.parent) {}
+    ASTModuleBase gtkModule;
+    this(this.locRange, this.baseType, this.parent, this.gtkModule) {}
 
     override (Symbol | fail Error) compile(Context context) {
         mut nullable GlibClass parent = null;
@@ -92,9 +93,14 @@ class ASTGlibClass : ASTSymbol
             context.assert2(!!parentSym.instanceOf(GlibClass), this.parent.locRange, "parent must be Glib class")?;
             parent = parentSym.instanceOf(GlibClass).notNull;
         }
-        auto baseType = context.namespace.lookup(
-            "_$(this.baseType)", context, LookupReason.identifier, this.locRange)?;
-        context.assert2(!!baseType, this.locRange, "base type _$(this.baseType) not found")?;
+        auto id = context.compiler.queueModuleCompilation(context, this.gtkModule);
+        auto gtkModule = context.compiler.getCompiledModule(id)?;
+
+        mut nullable Symbol baseType = gtkModule.lookup(
+            this.baseType, context, LookupReason.identifier, this.locRange)?;
+        context.assert2(!!baseType, this.locRange, "base type $(this.baseType) not found")?;
+        if (auto glibClass = baseType.instanceOf(GlibClass))
+            baseType = glibClass.baseType;
         auto baseType = new Pointer(baseType.notNull.beType(this.locRange)?);
         auto prefix = this.baseType.camelToSnake;
         return new GlibClass(prefix, baseType, parent);
@@ -232,22 +238,41 @@ public import __c_glib;
 public import __c_gtk_gtk;
 public import __gtk_libs;
 
-void connectSignal(GObject instance, string signal, void delegate() handler) {
-    auto state = cast(CallbackState*) malloc(sizeof(CallbackState));
+// TODO deprecated
+alias connectSignal = connectSignal0;
+
+void connectSignal0(GObject instance, string signal, void delegate() handler) {
+    mut auto state = cast(CallbackState0*) malloc(sizeof(CallbackState0));
     state.dg = handler;
     g_signal_connect_data(
-        cast(void*) instance, signal.toStringz, cast(void function()) &callSignal, state,
+        cast(void*) instance, signal.toStringz, cast(void function()) &callSignal0, state,
         cast(void function(void*, GClosure*)) null, 0);
 }
 
-private struct CallbackState {
+private struct CallbackState0 {
     void delegate() dg;
 }
 
-// TODO multi-parameter dispatching
-private void callSignal(void* widget, void* ptr) {
-    auto state = cast(CallbackState*) ptr;
+private void callSignal0(void* widget, void* ptr) {
+    auto state = cast(CallbackState0*) ptr;
     state.dg();
+}
+
+void connectSignal1(T)(GObject instance, string signal, void delegate(T) handler) {
+    mut auto state = cast(CallbackState1!T*) malloc(sizeof(CallbackState1!T));
+    state.dg = handler;
+    g_signal_connect_data(
+        cast(void*) instance, signal.toStringz, cast(void function()) &callSignal1!T, state,
+        cast(void function(void*, GClosure*)) null, 0);
+}
+
+private struct CallbackState1(T) {
+    void delegate(T) dg;
+}
+
+private void callSignal1(T)(void* widget, T arg, void* ptr) {
+    auto state = cast(CallbackState1!T*) ptr;
+    state.dg(arg);
 }
 
 alias GObject = defGlibClass("GObject");
@@ -406,3 +431,6 @@ alias CellRendererToggle = defGlibClass("GtkCellRendererToggle", CellRenderer);
 alias FileFilter = defGlibClass("GtkFileFilter", GObject);
 alias RecentFilter = defGlibClass("GtkRecentFilter", GObject);
 alias TreeViewColumn = defGlibClass("GtkTreeViewColumn", GObject);
+alias GlibObject = GObject;
+
+alias Pixbuf = defGlibClass("GdkPixbuf", GObject);
