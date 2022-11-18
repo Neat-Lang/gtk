@@ -201,6 +201,12 @@ class GlibClass : Type
             if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
                 if (auto funDecl = fun.instanceOf(FunctionDeclarationBase)) {
                     auto expr = funDecl.beExpressionImplCall(context, locRange)?;
+                    if (field == "new") {
+                        auto mySym = new ASTSymbolHelper(this);
+                        auto astExpr = new ASTSymbolHelper(expr);
+                        auto cast_ = context.compiler.astCast(mySym, astExpr, locRange);
+                        return cast_.compile(context)?.beExpression(locRange)?;
+                    }
                     return macro_.convertExpr(expr, context, locRange)?;
                 }
             }
