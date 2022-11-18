@@ -83,7 +83,6 @@ class GlibClassMacro : Macro
     nullable Type convertType(nullable Type type) {
         if (!type) return null;
         auto repr = type.repr;
-        print("look for alias: " ~ repr);
         if (this.definedAliases.has(repr))
             return this.definedAliases[repr];
         return null;
@@ -126,7 +125,6 @@ class ASTGlibClass : ASTSymbol
         auto baseType = new Pointer(baseType.notNull.beType(this.locRange)?);
         auto prefix = this.baseType.camelToSnake;
         auto class_ = new GlibClass(this.macro_, prefix, baseType, parent);
-        print("set alias: " ~ baseType.repr);
         this.macro_.definedAliases[baseType.repr] = class_;
         return class_;
     }
