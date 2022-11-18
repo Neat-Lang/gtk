@@ -166,9 +166,15 @@ class GlibClass : Type
     override (nullable Symbol | fail Error) accessMember(
         Context context, nullable Expression base, string field, Protection protection, LocRange locRange)
     {
-        if (!base) return null;
-        auto base = base.notNull;
         string glibName = "$(prefix)_$(field.camelToSnake)";
+        if (!base) {
+            if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
+                if (auto funDecl = fun.instanceOf(FunctionDeclarationBase))
+                    return funDecl;
+            }
+            return null;
+        }
+        auto base = base.notNull;
         if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
             if (auto funDecl = fun.instanceOf(FunctionDeclarationBase))
                 return new StubMethodCall(funDecl, base);
