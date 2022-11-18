@@ -14,6 +14,8 @@ class GlibClassMacro : Macro
 {
     nullable ASTModuleBase gtkModule;
 
+    Type[string] definedAliases;
+
     this() { }
     override void apply(MacroArgs args) {
         if (auto parseImport = args.instanceOf(ParseImportArgs)) {
@@ -75,16 +77,36 @@ class GlibClassMacro : Macro
         if (parser.accept(",")?)
             parent = compiler.parseExpression(parser, lexicalContext)?;
         parser.expect(")")?;
-        return new ASTGlibClass(locRange, baseType.text, parent, this.gtkModule.notNull);
+        return new ASTGlibClass(locRange, this, baseType.text, parent, this.gtkModule.notNull);
+    }
+
+    nullable Type convertType(nullable Type type) {
+        if (!type) return null;
+        auto repr = type.repr;
+        print("look for alias: " ~ repr);
+        if (this.definedAliases.has(repr))
+            return this.definedAliases[repr];
+        return null;
+    }
+
+    (Expression | fail Error) convertExpr(Expression expr, Context context, LocRange locRange) {
+        if (auto target = convertType(expr.type)) {
+            auto astTarget = new ASTSymbolHelper(target);
+            auto astExpr = new ASTSymbolHelper(expr);
+            auto cast_ = context.compiler.astCast(astTarget, astExpr, locRange);
+            return cast_.compile(context)?.beExpression(locRange)?;
+        }
+        return expr;
     }
 }
 
 class ASTGlibClass : ASTSymbol
 {
+    GlibClassMacro macro_;
     string baseType;
     nullable ASTSymbol parent;
     ASTModuleBase gtkModule;
-    this(this.locRange, this.baseType, this.parent, this.gtkModule) {}
+    this(this.locRange, this.macro_, this.baseType, this.parent, this.gtkModule) {}
 
     override (Symbol | fail Error) compile(Context context) {
         mut nullable GlibClass parent = null;
@@ -103,7 +125,10 @@ class ASTGlibClass : ASTSymbol
             baseType = glibClass.baseType;
         auto baseType = new Pointer(baseType.notNull.beType(this.locRange)?);
         auto prefix = this.baseType.camelToSnake;
-        return new GlibClass(prefix, baseType, parent);
+        auto class_ = new GlibClass(this.macro_, prefix, baseType, parent);
+        print("set alias: " ~ baseType.repr);
+        this.macro_.definedAliases[baseType.repr] = class_;
+        return class_;
     }
 
     override string repr() { return "defGlibClass($baseType, $(parent.repr))"; }
@@ -111,10 +136,11 @@ class ASTGlibClass : ASTSymbol
 
 class GlibClass : Type
 {
+    GlibClassMacro macro_;
     string prefix;
     Type baseType;
     nullable GlibClass parent;
-    this(this.prefix, this.baseType, this.parent) {
+    this(this.macro_, this.prefix, this.baseType, this.parent) {
         this.zeroInitializable = true;
     }
 
@@ -135,15 +161,19 @@ class GlibClass : Type
         // FIXME .astCall with ASTArgument
         mut ASTSymbol[] argSyms;
         for (arg in args) argSyms ~= arg.sym;
-        auto mySym = new ASTSymbolHelper(this);
         if (!base) {
             string glibName = "$(prefix)_$(field.camelToSnake)";
             ASTSymbol target = context.compiler.astIdentifier(glibName, locRange);
             auto call = context.compiler.astCall(target, argSyms, locRange);
-            // assume it's a constructor (TODO check this)
-            auto cast_ = context.compiler.astCast(mySym, call, locRange);
-
-            return cast_.compile(context)?.beExpression(locRange)?;
+            // <feep> whyyy does gtk_window_new return a GtkWidget*, not a GtkWindow*?
+            // <Company> feep: historic thing
+            if (field == "new") {
+                auto mySym = new ASTSymbolHelper(this);
+                auto cast_ = context.compiler.astCast(mySym, call, locRange);
+                return cast_.compile(context)?.beExpression(locRange)?;
+            }
+            auto ret = call.compile(context)?.beExpression(locRange)?;
+            return macro_.convertExpr(ret, context, locRange)?;
         }
         return callMethod(context, base.notNull, field, argSyms, locRange);
     }
@@ -157,7 +187,8 @@ class GlibClass : Type
             // TODO auto argsWithSelf = [new ASTSymbolHelper(base), ...args];
             auto argsWithSelf = [(new ASTSymbolHelper(base)).instanceOf(ASTSymbol).notNull] ~ args;
             auto call = context.compiler.astCall(target, argsWithSelf, locRange);
-            return call.compile(context)?.beExpression(locRange)?;
+            auto ret = call.compile(context)?.beExpression(locRange)?;
+            return macro_.convertExpr(ret, context, locRange)?;
         }
         if (auto parent = this.parent) return parent.callMethod(context, base, field, args, locRange);
         return null;
@@ -166,18 +197,27 @@ class GlibClass : Type
     override (nullable Symbol | fail Error) accessMember(
         Context context, nullable Expression base, string field, Protection protection, LocRange locRange)
     {
+
         string glibName = "$(prefix)_$(field.camelToSnake)";
         if (!base) {
             if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
-                if (auto funDecl = fun.instanceOf(FunctionDeclarationBase))
-                    return funDecl;
+                if (auto funDecl = fun.instanceOf(FunctionDeclarationBase)) {
+                    auto expr = funDecl.beExpressionImplCall(context, locRange)?;
+                    return macro_.convertExpr(expr, context, locRange)?;
+                }
             }
             return null;
         }
         auto base = base.notNull;
         if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
-            if (auto funDecl = fun.instanceOf(FunctionDeclarationBase))
+            if (auto funDecl = fun.instanceOf(FunctionDeclarationBase)) {
+                if (auto converted = macro_.convertType(funDecl.retWIP)) {
+                    auto newDecl = new FunctionDeclaration(
+                        funDecl.name, converted, funDecl.params);
+                    return new StubMethodCall(newDecl, base);
+                }
                 return new StubMethodCall(funDecl, base);
+            }
         }
         if (auto parent = this.parent) return parent.accessMember(context, base, field, protection, locRange);
         return null;
@@ -440,3 +480,4 @@ alias TreeViewColumn = defGlibClass("GtkTreeViewColumn", GObject);
 alias GlibObject = GObject;
 
 alias Pixbuf = defGlibClass("GdkPixbuf", GObject);
+alias StyleContext = defGlibClass("GtkStyleContext", GObject);
