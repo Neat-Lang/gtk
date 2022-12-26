@@ -2,7 +2,6 @@ module gtk;
 
 import backend.base;
 import neat.base;
-import neat.expr;
 import neat.hash;
 import neat.types;
 import neat.util;
@@ -70,14 +69,14 @@ class GlibClassMacro : Macro
         parser.expect("(")?;
         auto prefixFrom = parser.from?;
         parser.expect("\"")?;
-        auto baseType = compiler.parseStringLiteral(parser, lexicalContext, "\"", prefixFrom)?
-            .instanceOf(ASTStringLiteral)
-            .notNull;
+        auto baseType = compiler.(parseStringLiteral(parser, lexicalContext, "\"", prefixFrom)?
+            .destructAstStringLiteral
+            .case(:none: ""));
         mut nullable ASTSymbol parent = null;
         if (parser.accept(",")?)
             parent = compiler.parseExpression(parser, lexicalContext)?;
         parser.expect(")")?;
-        return new ASTGlibClass(locRange, this, baseType.text, parent, this.gtkModule.notNull);
+        return new ASTGlibClass(locRange, this, baseType, parent, this.gtkModule.notNull);
     }
 
     nullable Type convertType(nullable Type type) {
