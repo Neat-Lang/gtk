@@ -41,14 +41,14 @@ class GlibClassMacro : Macro
         }
         string extraIncludeFlags = (compiler.cFlags ~ cflagIncludes).join(" ");
 
-        if (parser.accept("__c_glib")?) {
+        if (parser.acceptIdentifier("__c_glib")) {
             return cImport.parseIncludeModule("glib.h", extraIncludeFlags, lexicalContext);
         }
-        if (parser.accept("__c_gtk_gtk")?) {
+        if (parser.acceptIdentifier("__c_gtk_gtk")) {
             this.gtkModule = cImport.parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext)?;
             return this.gtkModule;
         }
-        if (parser.accept("__gtk_libs")?) {
+        if (parser.acceptIdentifier("__gtk_libs")) {
             auto pak = new Package("gtk_libs", "", []);
             auto mod = compiler.astModule("gtk_libs", pak, new MacroState, __RANGE__, null);
             for (lib in libs) {
@@ -62,20 +62,20 @@ class GlibClassMacro : Macro
     }
 
     (nullable ASTSymbol | fail Error) parseGlibClass(Parser parser, LexicalContext lexicalContext) {
-        auto from = parser.from?;
-        if (!parser.accept("defGlibClass")?) return null;
+        auto from = parser.from;
+        if (!parser.acceptIdentifier("defGlibClass")) return null;
         auto locRange = parser.to(from);
         auto compiler = lexicalContext.compiler;
-        parser.expect("(")?;
-        auto prefixFrom = parser.from?;
-        parser.expect("\"")?;
+        parser.expectToken(TokenType.lparen)?;
+        auto prefixFrom = parser.from;
+        parser.expectToken(TokenType.doubleQuote)?;
         auto baseType = compiler.(parseStringLiteral(parser, lexicalContext, "\"", prefixFrom)?
             .destructAstStringLiteral
             .case(:none: ""));
         mut nullable ASTSymbol parent = null;
-        if (parser.accept(",")?)
+        if (parser.acceptToken(TokenType.comma))
             parent = compiler.parseExpression(parser, lexicalContext)?;
-        parser.expect(")")?;
+        parser.expectToken(TokenType.rparen)?;
         return new ASTGlibClass(locRange, this, baseType, parent, this.gtkModule.notNull);
     }
 
