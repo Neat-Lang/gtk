@@ -27,8 +27,9 @@ class GlibClassMacro : Macro
         }
     }
     (nullable ASTModuleBase | fail Error) parseImport(Parser parser, LexicalContext lexicalContext) {
+        import std.macro.cimport : parseIncludeModule;
+
         auto compiler = lexicalContext.compiler;
-        auto cImport = new CImportMacro;
         auto pkgTmp = ".obj/pkgconfig-gtk.txt";
         if (!pkgTmp.exists) {
             neat_runtime_system("pkg-config gtk+-3.0 gdk-pixbuf-2.0 --cflags-only-I --libs > $pkgTmp");
@@ -42,10 +43,10 @@ class GlibClassMacro : Macro
         string extraIncludeFlags = (compiler.cFlags ~ cflagIncludes).join(" ");
 
         if (parser.acceptIdentifier("__c_glib")) {
-            return cImport.parseIncludeModule("glib.h", extraIncludeFlags, lexicalContext);
+            return parseIncludeModule("glib.h", extraIncludeFlags, lexicalContext);
         }
         if (parser.acceptIdentifier("__c_gtk_gtk")) {
-            this.gtkModule = cImport.parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext)?;
+            this.gtkModule = parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext)?;
             return this.gtkModule;
         }
         if (parser.acceptIdentifier("__gtk_libs")) {
@@ -226,11 +227,13 @@ class GlibClass : Type
         return null;
     }
 
-    override nullable Expression implicitConvertTo(Context context, Expression source, Type target) {
+    override (nullable Expression | fail Error) implicitConvertTo(
+        Context context, Expression source, Type target, LocRange locRange)
+    {
         if (target.same(this) || target.same(this.baseType))
             return context.compiler.castTo(target, source);
         if (auto parent = this.parent)
-            return parent.implicitConvertTo(context, source, target);
+            return parent.implicitConvertTo(context, source, target, locRange);
         return null;
     }
 
@@ -291,8 +294,8 @@ public import __gtk_libs;
 alias connectSignal = connectSignal0;
 
 void connectSignal0(GObject instance, string signal, void delegate() handler) {
-    mut auto state = cast(CallbackState0*) malloc(sizeof(CallbackState0));
-    state.dg = handler;
+    mut auto state = cast(CallbackState0*) calloc(sizeof(CallbackState0), 1);
+    state.dg = __leak(handler);
     g_signal_connect_data(
         cast(void*) instance, signal.toStringz, cast(void function()) &callSignal0, state,
         cast(void function(void*, GClosure*)) null, 0);
