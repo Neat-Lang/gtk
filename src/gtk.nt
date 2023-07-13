@@ -295,7 +295,7 @@ alias connectSignal = connectSignal0;
 
 void connectSignal0(GObject instance, string signal, void delegate() handler) {
     mut auto state = cast(CallbackState0*) calloc(sizeof(CallbackState0), 1);
-    state.dg = __leak(handler);
+    state.dg = handler;
     g_signal_connect_data(
         cast(void*) instance, signal.toStringz, cast(void function()) &callSignal0, state,
         cast(void function(void*, GClosure*)) null, 0);
@@ -311,7 +311,7 @@ private void callSignal0(void* widget, void* ptr) {
 }
 
 void connectSignal1(T)(GObject instance, string signal, void delegate(T) handler) {
-    mut auto state = cast(CallbackState1!T*) malloc(sizeof(CallbackState1!T));
+    mut auto state = cast(CallbackState1!T*) calloc(sizeof(CallbackState1!T), 1);
     state.dg = handler;
     g_signal_connect_data(
         cast(void*) instance, signal.toStringz, cast(void function()) &callSignal1!T, state,
