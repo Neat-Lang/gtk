@@ -143,7 +143,7 @@ class GlibClass : Type
     }
 
     override BackendType emit(Platform platform) {
-        return new BackendPointerType(new BackendVoidType);
+        return new BackendPointerType(new BackendVoidType, platform);
     }
 
     override bool same(Type other) {
