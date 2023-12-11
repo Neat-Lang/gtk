@@ -71,13 +71,12 @@ class GlibClassMacro : Macro
         auto prefixFrom = parser.from;
         parser.expectToken(TokenType.doubleQuote)?;
         auto baseType = compiler.(parseStringLiteral(parser, lexicalContext, "\"", prefixFrom)?
-            .destructAstStringLiteral
-            .case(:none: ""));
+            .destructAstStringLiteral? else "");
         mut nullable ASTSymbol parent = null;
         if (parser.acceptToken(TokenType.comma))
             parent = compiler.parseExpression(parser, lexicalContext)?;
         parser.expectToken(TokenType.rparen)?;
-        return new ASTGlibClass(locRange, this, baseType, parent, this.gtkModule.notNull);
+        return new ASTGlibClass(locRange, this, baseType, parent, this.gtkModule? else die);
     }
 
     nullable Type convertType(nullable Type type) {
@@ -112,7 +111,7 @@ class ASTGlibClass : ASTSymbol
         if (this.parent) {
             auto parentSym = this.parent.compile(context)?;
             context.assert2(!!parentSym.instanceOf(GlibClass), this.parent.locRange, "parent must be Glib class")?;
-            parent = parentSym.instanceOf(GlibClass).notNull;
+            parent = parentSym.instanceOf(GlibClass)? else die;
         }
         auto id = context.compiler.queueModuleCompilation(context, this.gtkModule);
         auto gtkModule = context.compiler.getCompiledModule(id)?;
@@ -122,7 +121,7 @@ class ASTGlibClass : ASTSymbol
         context.assert2(!!baseType, this.locRange, "base type $(this.baseType) not found")?;
         if (auto glibClass = baseType.instanceOf(GlibClass))
             baseType = glibClass.baseType;
-        auto baseType = new Pointer(baseType.notNull.beType(this.locRange)?);
+        auto baseType = new Pointer(baseType?.beType(this.locRange)? else die);
         auto prefix = this.baseType.camelToSnake;
         auto class_ = new GlibClass(this.macro_, prefix, baseType, parent);
         this.macro_.definedAliases[baseType.repr] = class_;
@@ -173,7 +172,7 @@ class GlibClass : Type
             auto ret = call.compile(context)?.beExpression(locRange)?;
             return macro_.convertExpr(ret, context, locRange)?;
         }
-        return callMethod(context, base.notNull, field, argSyms, locRange);
+        return callMethod(context, base? else die, field, argSyms, locRange);
     }
 
     (nullable Expression | fail Error) callMethod(
@@ -183,7 +182,7 @@ class GlibClass : Type
         if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
             auto target = new ASTSymbolHelper(fun);
             // TODO auto argsWithSelf = [new ASTSymbolHelper(base), ...args];
-            auto argsWithSelf = [(new ASTSymbolHelper(base)).instanceOf(ASTSymbol).notNull] ~ args;
+            auto argsWithSelf = [(new ASTSymbolHelper(base)).instanceOf(ASTSymbol)? else die] ~ args;
             auto call = context.compiler.astCall(target, argsWithSelf, locRange);
             auto ret = call.compile(context)?.beExpression(locRange)?;
             return macro_.convertExpr(ret, context, locRange)?;
@@ -212,7 +211,7 @@ class GlibClass : Type
             }
             return null;
         }
-        auto base = base.notNull;
+        auto base = base? else die;
         if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
             if (auto funDecl = fun.instanceOf(FunctionDeclarationBase)) {
                 if (auto converted = macro_.convertType(funDecl.retWIP)) {
