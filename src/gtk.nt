@@ -11,9 +11,9 @@ import std.string;
 
 class GlibClassMacro : Macro
 {
-    nullable ASTModuleBase gtkModule;
+    mut nullable ASTModuleBase gtkModule;
 
-    Type[string] definedAliases;
+    mut Type[string] definedAliases;
 
     this() { }
     override void apply(MacroArgs args) {
