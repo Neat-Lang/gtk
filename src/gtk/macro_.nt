@@ -1,0 +1,293 @@
+module gtk.macro_;
+
+import backend.base;
+import neat.base;
+import neat.hash;
+import neat.types;
+import neat.util;
+import std.file;
+import std.macro.cimport;
+import std.string;
+
+class GlibClassMacro : Macro
+{
+    mut nullable ASTModuleBase gtkModule;
+
+    mut Type[string] definedAliases;
+
+    this() { }
+    override void apply(MacroArgs args) {
+        if (auto parseImport = args.instanceOf(ParseImportArgs)) {
+            parseImport.module_ = this.parseImport(parseImport.parser, parseImport.lexicalContext);
+            return;
+        }
+        if (auto parseType = args.instanceOf(TypeMacroArgs)) {
+            parseType.astType = this.parseGlibClass(parseType.parser, parseType.lexicalContext);
+            return;
+        }
+    }
+    (nullable ASTModuleBase | fail Error) parseImport(Parser parser, LexicalContext lexicalContext) {
+        import std.macro.cimport : parseIncludeModule;
+
+        auto compiler = lexicalContext.compiler;
+        auto pkgTmp = ".obj/pkgconfig-gtk.txt";
+        if (!pkgTmp.exists) {
+            neat_runtime_system("pkg-config gtk+-3.0 gdk-pixbuf-2.0 --cflags-only-I --libs > $pkgTmp");
+        }
+        mut string[] cflagIncludes;
+        mut string[] libs;
+        for (flag in pkgTmp.readText.strip.split(" ")) {
+            if (flag.startsWith("-I")) cflagIncludes ~= flag;
+            if (flag.startsWith("-l")) libs ~= flag[2 .. $];
+        }
+        string extraIncludeFlags = (compiler.cFlags ~ cflagIncludes).join(" ");
+
+        with (parser.transaction) {
+            if (!parser.acceptIdentifier("gtk") || !parser.acceptToken(TokenType.lparen))
+                return null;
+            commit;
+            auto gtkModule = parser.parseIdentifier;
+            parser.expectToken(TokenType.rparen)?;
+            if (gtkModule == "glib") {
+                return parseIncludeModule("glib.h", extraIncludeFlags, lexicalContext);
+            }
+            if (gtkModule == "gtk") {
+                this.gtkModule = parseIncludeModule("gtk/gtk.h", extraIncludeFlags, lexicalContext)?;
+                return this.gtkModule;
+            }
+            if (gtkModule == "libs") {
+                auto pak = new Package("gtk_libs", "", []);
+                auto mod = compiler.astModule("gtk_libs", pak, new MacroState, __RANGE__, null);
+                for (lib in libs) {
+                    mod.addEntry(
+                        Protection.private_,
+                        compiler.astPragma("lib", [compiler.astStringLiteral(lib, __RANGE__)], __RANGE__));
+                }
+                return mod;
+            }
+            return parser.fail("I don't know that gtk macro import");
+        }
+    }
+
+    (nullable ASTSymbol | fail Error) parseGlibClass(Parser parser, LexicalContext lexicalContext) {
+        auto from = parser.from;
+        if (!parser.acceptIdentifier("defGlibClass")) return null;
+        auto locRange = parser.to(from);
+        auto compiler = lexicalContext.compiler;
+        parser.expectToken(TokenType.lparen)?;
+        auto prefixFrom = parser.from;
+        parser.expectToken(TokenType.doubleQuote)?;
+        auto baseType = compiler.(parseStringLiteral(parser, lexicalContext, "\"", prefixFrom)?
+            .destructAstStringLiteral? else "");
+        mut nullable ASTSymbol parent = null;
+        if (parser.acceptToken(TokenType.comma))
+            parent = compiler.parseExpression(parser, lexicalContext)?;
+        parser.expectToken(TokenType.rparen)?;
+        return new ASTGlibClass(locRange, this, baseType, parent, this.gtkModule? else die);
+    }
+
+    nullable Type convertType(nullable Type type) {
+        if (!type) return null;
+        auto repr = type.repr;
+        if (this.definedAliases.has(repr))
+            return this.definedAliases[repr];
+        return null;
+    }
+
+    (Expression | fail Error) convertExpr(Expression expr, Context context, LocRange locRange) {
+        if (auto target = convertType(expr.type)) {
+            auto astTarget = new ASTSymbolHelper(target);
+            auto astExpr = new ASTSymbolHelper(expr);
+            auto cast_ = context.compiler.astCast(astTarget, astExpr, locRange);
+            return cast_.compile(context)?.beExpression(locRange)?;
+        }
+        return expr;
+    }
+}
+
+class ASTGlibClass : ASTSymbol
+{
+    GlibClassMacro macro_;
+    string baseType;
+    nullable ASTSymbol parent;
+    ASTModuleBase gtkModule;
+    this(this.locRange, this.macro_, this.baseType, this.parent, this.gtkModule) {}
+
+    override (Symbol | fail Error) compile(Context context) {
+        mut nullable GlibClass parent = null;
+        if (this.parent) {
+            auto parentSym = this.parent.compile(context)?;
+            context.assert2(!!parentSym.instanceOf(GlibClass), this.parent.locRange, "parent must be Glib class")?;
+            parent = parentSym.instanceOf(GlibClass)? else die;
+        }
+        auto id = context.compiler.queueModuleCompilation(context, this.gtkModule);
+        auto gtkModule = context.compiler.getCompiledModule(id)?;
+
+        mut nullable Symbol baseType = gtkModule.lookup(
+            this.baseType, context, LookupReason.identifier, this.locRange)?;
+        context.assert2(!!baseType, this.locRange, "base type $(this.baseType) not found")?;
+        if (auto glibClass = baseType.instanceOf(GlibClass))
+            baseType = glibClass.baseType;
+        auto baseType = new Pointer(baseType?.beType(this.locRange)? else die);
+        auto prefix = this.baseType.camelToSnake;
+        auto class_ = new GlibClass(this.macro_, prefix, baseType, parent);
+        this.macro_.definedAliases[baseType.repr] = class_;
+        return class_;
+    }
+
+    override string repr() { return "defGlibClass($baseType, $(parent.repr))"; }
+}
+
+class GlibClass : Type
+{
+    GlibClassMacro macro_;
+    string prefix;
+    Type baseType;
+    nullable GlibClass parent;
+    this(this.macro_, this.prefix, this.baseType, this.parent) {
+        this.zeroInitializable = true;
+    }
+
+    override BackendType emit(Platform platform) {
+        return new BackendPointerType(new BackendVoidType, platform);
+    }
+
+    override bool same(Type other) {
+        if (auto otherGlib = other.instanceOf(GlibClass))
+            return this.prefix == otherGlib.prefix;
+        return false;
+    }
+
+    override (nullable Expression | fail Error) callMember(
+        Context context, nullable Expression base, string field, ASTArgument[] args,
+        Protection protection, LocRange locRange)
+    {
+        // FIXME .astCall with ASTArgument
+        mut ASTSymbol[] argSyms;
+        for (arg in args) argSyms ~= arg.sym;
+        if (!base) {
+            string glibName = "$(prefix)_$(field.camelToSnake)";
+            ASTSymbol target = context.compiler.astIdentifier(glibName, locRange);
+            auto call = context.compiler.astCall(target, argSyms, locRange);
+            // <feep> whyyy does gtk_window_new return a GtkWidget*, not a GtkWindow*?
+            // <Company> feep: historic thing
+            if (field == "new") {
+                auto mySym = new ASTSymbolHelper(this);
+                auto cast_ = context.compiler.astCast(mySym, call, locRange);
+                return cast_.compile(context)?.beExpression(locRange)?;
+            }
+            auto ret = call.compile(context)?.beExpression(locRange)?;
+            return macro_.convertExpr(ret, context, locRange)?;
+        }
+        return callMethod(context, base? else die, field, argSyms, locRange);
+    }
+
+    (nullable Expression | fail Error) callMethod(
+        Context context, Expression base, string field, ASTSymbol[] args, LocRange locRange)
+    {
+        string glibName = "$(prefix)_$(field.camelToSnake)";
+        if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
+            auto target = new ASTSymbolHelper(fun);
+            // TODO auto argsWithSelf = [new ASTSymbolHelper(base), ...args];
+            auto argsWithSelf = [(new ASTSymbolHelper(base)).instanceOf(ASTSymbol)? else die] ~ args;
+            auto call = context.compiler.astCall(target, argsWithSelf, locRange);
+            auto ret = call.compile(context)?.beExpression(locRange)?;
+            return macro_.convertExpr(ret, context, locRange)?;
+        }
+        if (auto parent = this.parent) return parent.callMethod(context, base, field, args, locRange);
+        return null;
+    }
+
+    override (nullable Symbol | fail Error) accessMember(
+        Context context, nullable Expression base, string field, Protection protection, LocRange locRange)
+    {
+
+        string glibName = "$(prefix)_$(field.camelToSnake)";
+        if (!base) {
+            if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
+                if (auto funDecl = fun.instanceOf(FunctionDeclarationBase)) {
+                    auto expr = funDecl.beExpressionImplCall(context, locRange)?;
+                    if (field == "new") {
+                        auto mySym = new ASTSymbolHelper(this);
+                        auto astExpr = new ASTSymbolHelper(expr);
+                        auto cast_ = context.compiler.astCast(mySym, astExpr, locRange);
+                        return cast_.compile(context)?.beExpression(locRange)?;
+                    }
+                    return macro_.convertExpr(expr, context, locRange)?;
+                }
+            }
+            return null;
+        }
+        auto base = base? else die;
+        if (auto fun = context.namespace.lookup(glibName, context, LookupReason.identifier, locRange)?) {
+            if (auto funDecl = fun.instanceOf(FunctionDeclarationBase)) {
+                if (auto converted = macro_.convertType(funDecl.retWIP)) {
+                    auto newDecl = new FunctionDeclaration(
+                        funDecl.name, converted, funDecl.params);
+                    return new StubMethodCall(newDecl, base);
+                }
+                return new StubMethodCall(funDecl, base);
+            }
+        }
+        if (auto parent = this.parent) return parent.accessMember(context, base, field, protection, locRange);
+        return null;
+    }
+
+    override (nullable Expression | fail Error) implicitConvertTo(
+        Context context, Expression source, Type target, LocRange locRange)
+    {
+        if (target.same(this) || target.same(this.baseType))
+            return context.compiler.castTo(target, source);
+        if (auto parent = this.parent)
+            return parent.implicitConvertTo(context, source, target, locRange);
+        return null;
+    }
+
+    override string repr() { return this.prefix; }
+
+    override string mangle() { return "glib_" ~ this.prefix; }
+
+    override void hash(Hash hash) { hash.adds("glib"); hash.adds(this.prefix); }
+}
+
+private class StubMethodCall : LateSymbol
+{
+    FunctionDeclarationBase fun;
+    Expression firstArg;
+    this(this.fun, this.firstArg) {}
+    override LateSymbolResult resolve(Context context) {
+        auto funcPtr = context.compiler.functionReference(fun);
+        return LateSymbolResult(setup=null, funcPtr=funcPtr, firstArg=firstArg, teardown=null);
+    }
+}
+
+private string camelToSnake(string text) {
+    mut string[] fragments;
+    mut size_t base = 0;
+    bool isUpper(char c) { return c >= "A"[0] && c <= "Z"[0]; }
+    char toLower(char c) { if (c.isUpper) return c + ("a"[0] - "A"[0]); return c; }
+    void flush(size_t i) {
+        if (base == i) return;
+        mut string fragment;
+        for (ch in text[base .. i]) fragment ~= ch.toLower;
+        fragments ~= fragment;
+        base = i;
+    }
+    // VBox => _vbox, not _v_box
+    mut bool lastWasUpper = false;
+    for (i, ch in text) {
+        if (ch.isUpper && !lastWasUpper) {
+            flush(i);
+        }
+        lastWasUpper = ch.isUpper;
+    }
+    flush(text.length);
+    return fragments.join("_");
+}
+
+private void addGlibClassMacro(MacroState macroState)
+{
+    macroState.addMacro(new GlibClassMacro);
+}
+
+macro(addGlibClassMacro);
