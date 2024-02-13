@@ -26,7 +26,7 @@ class GlibClassMacro : Macro
             return;
         }
     }
-    (nullable ASTModuleBase | fail Error) parseImport(Parser parser, LexicalContext lexicalContext) {
+    (nullable ASTModuleBase | Error) parseImport(Parser parser, LexicalContext lexicalContext) {
         import std.macro.cimport : parseIncludeModule;
 
         auto compiler = lexicalContext.compiler;
@@ -69,7 +69,7 @@ class GlibClassMacro : Macro
         }
     }
 
-    (nullable ASTSymbol | fail Error) parseGlibClass(Parser parser, LexicalContext lexicalContext) {
+    (nullable ASTSymbol | Error) parseGlibClass(Parser parser, LexicalContext lexicalContext) {
         auto from = parser.from;
         if (!parser.acceptIdentifier("defGlibClass")) return null;
         auto locRange = parser.to(from);
@@ -94,7 +94,7 @@ class GlibClassMacro : Macro
         return null;
     }
 
-    (Expression | fail Error) convertExpr(Expression expr, Context context, LocRange locRange) {
+    (Expression | Error) convertExpr(Expression expr, Context context, LocRange locRange) {
         if (auto target = convertType(expr.type)) {
             auto astTarget = new ASTSymbolHelper(target);
             auto astExpr = new ASTSymbolHelper(expr);
@@ -113,7 +113,7 @@ class ASTGlibClass : ASTSymbol
     ASTModuleBase gtkModule;
     this(this.locRange, this.macro_, this.baseType, this.parent, this.gtkModule) {}
 
-    override (Symbol | fail Error) compile(Context context) {
+    override (Symbol | Error) compile(Context context) {
         mut nullable GlibClass parent = null;
         if (this.parent) {
             auto parentSym = this.parent.compile(context)?;
@@ -158,7 +158,7 @@ class GlibClass : Type
         return false;
     }
 
-    override (nullable Expression | fail Error) callMember(
+    override (nullable Expression | Error) callMember(
         Context context, nullable Expression base, string field, ASTArgument[] args,
         Protection protection, LocRange locRange)
     {
@@ -182,7 +182,7 @@ class GlibClass : Type
         return callMethod(context, base? else die, field, argSyms, locRange);
     }
 
-    (nullable Expression | fail Error) callMethod(
+    (nullable Expression | Error) callMethod(
         Context context, Expression base, string field, ASTSymbol[] args, LocRange locRange)
     {
         string glibName = "$(prefix)_$(field.camelToSnake)";
@@ -198,7 +198,7 @@ class GlibClass : Type
         return null;
     }
 
-    override (nullable Symbol | fail Error) accessMember(
+    override (nullable Symbol | Error) accessMember(
         Context context, nullable Expression base, string field, Protection protection, LocRange locRange)
     {
 
@@ -233,7 +233,7 @@ class GlibClass : Type
         return null;
     }
 
-    override (nullable Expression | fail Error) implicitConvertTo(
+    override (nullable Expression | Error) implicitConvertTo(
         Context context, Expression source, Type target, LocRange locRange)
     {
         if (target.same(this) || target.same(this.baseType))
