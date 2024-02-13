@@ -205,5 +205,7 @@ alias RecentFilter = defGlibClass("GtkRecentFilter", GObject);
 alias TreeViewColumn = defGlibClass("GtkTreeViewColumn", GObject);
 alias GlibObject = GObject;
 
+alias ListStore = defGlibClass("GtkListStore", GObject);
 alias Pixbuf = defGlibClass("GdkPixbuf", GObject);
 alias StyleContext = defGlibClass("GtkStyleContext", GObject);
+alias TreeModel = defGlibClass("GtkTreeModel", GObject);
